@@ -11,7 +11,7 @@ const SECTION_ORDER = 550;
 export const inject = ["systemPrompt"];
 
 export const Config = z.object({
-  thresholds: z.array(z.number()).default([4, 7, 10]),
+  thresholds: z.array(z.number()).default([3, 5, 8]),
   include: z.array(z.string()).default([]),
   exclude: z.array(z.string()).default(["answer_now"]),
   cooldownSteps: z.number().default(1),
@@ -19,6 +19,9 @@ export const Config = z.object({
   resetOnUserMessage: z.boolean().default(true),
   quietTools: z.array(z.string()).default(["todo_write", "todo_read", "todo_write_many", "schedule_list"]),
   showStartNotice: z.boolean().default(true),
+  simpleTaskFirst: z.boolean().default(true),
+  repeatReminderEnabled: z.boolean().default(true),
+  repeatMax: z.number().default(3),
 });
 
 const PROMPT = `## Deliver as soon as you have an answer
@@ -32,6 +35,8 @@ You have a budget of tool calls, and every extra call costs the user time. Follo
 5. **No filler work.** Do not call tools to demonstrate effort, to "confirm" something you already know, or to double-check a fact you are confident about.
 
 When this session injects a reminder telling you that you have used many tool calls, treat it as an instruction to wrap up: stop querying and answer with what you already know.
+
+SIMPLE TASKS FIRST. Most requests are small — a one-line fix, a typo, a quick lookup, a short answer. For these, do the minimum: read only the file(s) involved, make the single change, and reply. Do NOT broaden the scope, do not refactor surrounding code, do not run exploratory searches, do not open extra files "to be safe". A simple bug fix should be a read, an edit, and a short explanation — not a tour of the codebase.
 
 At the very start of every new session (first answer after the user's opening message), render a small status panel confirming this plugin is active and how it works, so the user can see it is doing its job. The panel should state: the "answer-now" plugin is enabled; its job is to make you deliver results as soon as you have them and to nudge you when a turn uses too many tool calls; the call thresholds (e.g. THRESHOLDS); and that reminders appear inline as "[answer-now] …" messages. Keep it brief. If showStartNotice is disabled, skip this.`;
 
@@ -83,7 +88,7 @@ function apply(ctx, config) {
   function stateOf(agent) {
     let state = chains.get(agent);
     if (state === undefined) {
-      state = { count: 0, level: 0, cooldown: 0, done: false };
+      state = { count: 0, level: 0, cooldown: 0, done: false, last: new Map() };
       chains.set(agent, state);
     }
     return state;
@@ -97,6 +102,23 @@ function apply(ctx, config) {
     state.count += 1;
     if (state.done) return;
     if (quiet(exec.name) && state.count <= (thresholds[0] ?? Number.POSITIVE_INFINITY)) return;
+
+    if (config.repeatReminderEnabled) {
+      const key = `${exec.name}::${JSON.stringify(exec.arguments ?? null)}`;
+      const prev = state.last.get(key) ?? 0;
+      if (prev >= config.repeatMax) {
+        const text = `[answer-now] You ran ${exec.name} with these arguments ${prev + 1}× this turn. You already have this result — stop re-querying and answer with what you have.`;
+        exec.agent.inbox.prepend("next-step", {
+          role: "user",
+          content: [{ type: "text", text }],
+          source: { ...SOURCE, form: "notice", summary: config.reminderSummary },
+        });
+        state.last.set(key, prev + 1);
+        return;
+      }
+      state.last.set(key, prev + 1);
+    }
+
     while (state.level < maxLevel && state.count >= thresholds[state.level + 1]) state.level += 1;
     if (state.count < thresholds[state.level]) return;
     if (state.cooldown > 0) {
@@ -126,14 +148,17 @@ function apply(ctx, config) {
   });
 
   if (config.showStartNotice) {
+    const notice = `[answer-now] Plugin enabled. It pushes me to do simple tasks simply (read the one file, make the one change, answer) and to deliver as soon as I have an answer, and will remind me inline (as "[answer-now] …" messages) once a turn uses too many tool calls. Active thresholds: ${thresholds.join(", ")}.`;
     ctx.on("agent/created", ({ agent }) => {
-      const dispose = agent.ctx.on("agent/pre-step", ({ step }) => {
-        if (step !== 1) return;
-        agent.inbox.prepend("next-step", {
-          role: "user",
-          content: [{ type: "text", text: `[answer-now] Plugin enabled. It pushes me to deliver as soon as I have an answer and will remind me inline (as "[answer-now] …" messages) once a turn uses too many tool calls. Active thresholds: ${thresholds.join(", ")}.` }],
-          source: { ...SOURCE, form: "notice", summary: "answer-now active" },
-        });
+      const dispose = agent.ctx.on("agent/pre-step", ({ agent: current, step }, next) => {
+        if (step === 1) {
+          current.inbox.prepend("next-step", {
+            role: "user",
+            content: [{ type: "text", text: notice }],
+            source: { ...SOURCE, form: "notice", summary: "answer-now active" },
+          });
+        }
+        return next();
       });
       ctx.effect(() => dispose, "answer-now.startNotice");
     });
