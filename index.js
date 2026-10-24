@@ -18,6 +18,7 @@ export const Config = z.object({
   reminderSummary: z.string().default("answer now"),
   resetOnUserMessage: z.boolean().default(true),
   quietTools: z.array(z.string()).default(["todo_write", "todo_read", "todo_write_many", "schedule_list"]),
+  showStartNotice: z.boolean().default(true),
 });
 
 const PROMPT = `## Deliver as soon as you have an answer
@@ -30,7 +31,9 @@ You have a budget of tool calls, and every extra call costs the user time. Follo
 4. **Answer with what you have.** If the information is sufficient for a correct answer, deliver it now. Partial answers delivered promptly beat exhaustive answers delivered late.
 5. **No filler work.** Do not call tools to demonstrate effort, to "confirm" something you already know, or to double-check a fact you are confident about.
 
-When this session injects a reminder telling you that you have used many tool calls, treat it as an instruction to wrap up: stop querying and answer with what you already know.`;
+When this session injects a reminder telling you that you have used many tool calls, treat it as an instruction to wrap up: stop querying and answer with what you already know.
+
+At the very start of every new session (first answer after the user's opening message), render a small status panel confirming this plugin is active and how it works, so the user can see it is doing its job. The panel should state: the "answer-now" plugin is enabled; its job is to make you deliver results as soon as you have them and to nudge you when a turn uses too many tool calls; the call thresholds (e.g. THRESHOLDS); and that reminders appear inline as "[answer-now] …" messages. Keep it brief. If showStartNotice is disabled, skip this.`;
 
 function wildcardToRegExp(pattern) {
   const escaped = pattern
@@ -72,7 +75,7 @@ function apply(ctx, config) {
   ctx.systemPrompt.section({
     name: SECTION_NAME,
     order: SECTION_ORDER,
-    text: PROMPT,
+    text: PROMPT.replace("THRESHOLDS", thresholds.join(", ")),
   });
 
   const chains = new WeakMap();
@@ -121,6 +124,20 @@ function apply(ctx, config) {
     }
     return next();
   });
+
+  if (config.showStartNotice) {
+    ctx.on("agent/created", ({ agent }) => {
+      const dispose = agent.ctx.on("agent/pre-step", ({ step }) => {
+        if (step !== 1) return;
+        agent.inbox.prepend("next-step", {
+          role: "user",
+          content: [{ type: "text", text: `[answer-now] Plugin enabled. It pushes me to deliver as soon as I have an answer and will remind me inline (as "[answer-now] …" messages) once a turn uses too many tool calls. Active thresholds: ${thresholds.join(", ")}.` }],
+          source: { ...SOURCE, form: "notice", summary: "answer-now active" },
+        });
+      });
+      ctx.effect(() => dispose, "answer-now.startNotice");
+    });
+  }
 }
 
 export { apply, name };
