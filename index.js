@@ -1,5 +1,8 @@
 import z from "@deepseek-ai/schemastery";
 import { BlockAssembler, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 const name = "answer-now";
 
@@ -8,6 +11,8 @@ const SOURCE = { kind: "answer-now" };
 const SECTION_NAME = "answer-now";
 
 const SECTION_ORDER = 550;
+
+const CONFIG_ROUTE_PATH = "/api/lin-answer-now/config";
 
 export const inject = ["systemPrompt", "llm"];
 
@@ -34,6 +39,147 @@ export const Config = z.object({
   reviewProvider: z.string(),
   reviewModel: z.string(),
 });
+
+// ---------------------------------------------------------------------------
+// Config store. The loader hands us a snapshot; the visual config panel edits
+// through an HTTP route, so the live values are kept here and every consumer
+// reads them at use time instead of closing over the activation snapshot.
+// ---------------------------------------------------------------------------
+
+function defaultConfigPath() {
+  const home = process.env.DSH_HOME || join(homedir(), ".dsh");
+  return join(home, "lin-answer-now.json");
+}
+
+function createConfigStore(initial, filePath) {
+  let current = { ...initial };
+  const listeners = new Set();
+
+  function get() {
+    return current;
+  }
+
+  function emit() {
+    for (const listener of listeners) {
+      try {
+        listener(current);
+      } catch {
+        /* a broken listener must not break the others */
+      }
+    }
+  }
+
+  async function load() {
+    if (!filePath) return current;
+    try {
+      const raw = await readFile(filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        current = { ...current, ...sanitizeConfigPatch(parsed) };
+        emit();
+      }
+    } catch {
+      /* missing or unreadable file: activation defaults win */
+    }
+    return current;
+  }
+
+  async function save() {
+    if (!filePath) return;
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, `${JSON.stringify(current, null, 2)}\n`, "utf8");
+  }
+
+  async function update(partial) {
+    const patch = sanitizeConfigPatch(partial);
+    if (Object.keys(patch).length === 0) return { config: current, changed: false };
+    current = { ...current, ...patch };
+    emit();
+    await save();
+    return { config: current, changed: true };
+  }
+
+  function subscribe(listener) {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+
+  return {
+    get,
+    load,
+    save,
+    update,
+    subscribe,
+    get path() {
+      return filePath ?? "(in-memory)";
+    },
+  };
+}
+
+const BOOLEAN_KEYS = [
+  "resetOnUserMessage",
+  "skipSubagents",
+  "showStartNotice",
+  "simpleTaskFirst",
+  "repeatReminderEnabled",
+  "reviewEnabled",
+];
+
+const NUMBER_KEYS = {
+  cooldownSteps: [0, 10],
+  repeatMax: [1, 10],
+  reviewThreshold: [1, 100],
+  maxChallenges: [1, 8],
+  maxReviewTokens: [1, 4096],
+  reviewTimeoutMs: [1000, 600_000],
+};
+
+const STRING_KEYS = ["reminderSummary", "reviewProvider", "reviewModel"];
+
+const LIST_KEYS = ["thresholds", "include", "exclude", "quietTools"];
+
+/** Coerce an untrusted patch (HTTP body or on-disk JSON) into known Config keys. */
+export function sanitizeConfigPatch(input) {
+  const out = {};
+  if (!input || typeof input !== "object" || Array.isArray(input)) return out;
+
+  for (const key of BOOLEAN_KEYS) {
+    if (typeof input[key] === "boolean") out[key] = input[key];
+  }
+
+  for (const [key, [lo, hi]] of Object.entries(NUMBER_KEYS)) {
+    const value = input[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      out[key] = Math.min(hi, Math.max(lo, Math.round(value)));
+    }
+  }
+
+  for (const key of STRING_KEYS) {
+    if (typeof input[key] === "string") out[key] = input[key].trim();
+  }
+
+  for (const key of LIST_KEYS) {
+    const value = input[key];
+    if (!Array.isArray(value)) continue;
+    if (key === "thresholds") {
+      const seen = new Set();
+      const numbers = [];
+      for (const raw of value) {
+        const number = Number(raw);
+        if (!Number.isInteger(number) || number < 1 || seen.has(number)) continue;
+        seen.add(number);
+        numbers.push(number);
+      }
+      out[key] = numbers.sort((a, b) => a - b);
+    } else {
+      out[key] = value
+        .filter((item) => typeof item === "string" && item.trim().length > 0)
+        .map((item) => item.trim());
+    }
+  }
+
+  return out;
+}
 
 const PROMPT = `## Deliver as soon as you have an answer
 
@@ -97,7 +243,7 @@ function* normalizeThresholds(raw) {
 const MIN_SCORE = 1;
 const MAX_SCORE = 100;
 const MAX_CHALLENGES_HARD_CAP = 8;
-const DEFAULT_REVIEW_THRESHOLD = 80;
+const DEFAULT_REVIEW_THRESHOLD = 70;
 
 function clampPositiveInt(value, fallback, hi) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 1) return fallback;
@@ -372,19 +518,91 @@ function resolveReviewConfig(config) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Derived view over the live config. Thresholds and tool matchers are rebuilt
+// whenever the store changes, so a save in the panel takes effect next call.
+// ---------------------------------------------------------------------------
+
+function deriveView(config) {
+  const thresholds = [...normalizeThresholds(config.thresholds ?? [])].sort((a, b) => a - b);
+  return Object.freeze({
+    config,
+    thresholds,
+    maxLevel: Math.max(0, thresholds.length - 1),
+    included: matcher(config.include ?? []),
+    excluded: matcher(config.exclude ?? []),
+    quiet: matcher(config.quietTools ?? []),
+  });
+}
+
 function apply(ctx, config) {
-  const thresholds = [...normalizeThresholds(config.thresholds)];
-  const included = matcher(config.include);
-  const excluded = matcher(config.exclude);
-  const quiet = matcher(config.quietTools);
-  const maxLevel = thresholds.length - 1;
-  const review = resolveReviewConfig(config);
+  const store = createConfigStore(config, defaultConfigPath());
   const counter = createChallengeCounter();
+  let view = deriveView(store.get());
+
+  store.subscribe((next) => {
+    view = deriveView(next);
+  });
+  store.load().then(
+    (next) => {
+      view = deriveView(next);
+    },
+    (error) => {
+      ctx.logger?.warn?.(`answer-now: config load failed, using activation defaults: ${String(error)}`);
+    },
+  );
 
   ctx.systemPrompt.section({
     name: SECTION_NAME,
     order: SECTION_ORDER,
-    text: PROMPT.replace("THRESHOLDS", thresholds.join(", ")),
+    text: PROMPT.replace("THRESHOLDS", view.thresholds.join(", ")),
+  });
+
+  // Same-origin JSON API for the visual config panel (and for curl).
+  ctx.inject(["webServer", "connection"], (scope) => {
+    const handler = async (req, res) => {
+      const connection = Reflect.get(scope, "connection");
+      const rejection = connection?.requestRejection?.(req);
+      if (rejection !== undefined) {
+        res.statusCode = rejection;
+        res.end();
+        return true;
+      }
+      res.setHeader("content-type", "application/json; charset=utf-8");
+      if (req.method === "GET") {
+        res.statusCode = 200;
+        res.end(JSON.stringify({ config: store.get(), path: store.path, route: CONFIG_ROUTE_PATH }));
+        return true;
+      }
+      if (req.method === "POST") {
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        let parsed;
+        try {
+          parsed = JSON.parse(body || "{}");
+        } catch {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: "invalid JSON body" }));
+          return true;
+        }
+        try {
+          const result = await store.update(parsed);
+          res.statusCode = 200;
+          res.end(JSON.stringify({ config: result.config, path: store.path, changed: result.changed }));
+        } catch (error) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: String(error) }));
+        }
+        return true;
+      }
+      res.statusCode = 405;
+      res.end(JSON.stringify({ error: "method not allowed" }));
+      return true;
+    };
+    scope.effect(
+      () => scope.webServer.register({ kind: "exact", path: CONFIG_ROUTE_PATH, handler }),
+      "answer-now: GET/POST config route",
+    );
   });
 
   const chains = new WeakMap();
@@ -400,7 +618,8 @@ function apply(ctx, config) {
 
   function observe(exec) {
     if (exec.agent === undefined) return;
-    if (config.skipSubagents && isSubagentSession(exec.agent)) return;
+    const { config: live, thresholds, maxLevel, included, excluded, quiet } = view;
+    if (live.skipSubagents && isSubagentSession(exec.agent)) return;
     if (!included(exec.name) || excluded(exec.name)) return;
     if (exec.signal?.aborted) return;
     const state = stateOf(exec.agent);
@@ -408,15 +627,15 @@ function apply(ctx, config) {
     if (state.done) return;
     if (quiet(exec.name) && state.count <= (thresholds[0] ?? Number.POSITIVE_INFINITY)) return;
 
-    if (config.repeatReminderEnabled) {
+    if (live.repeatReminderEnabled) {
       const key = `${exec.name}::${JSON.stringify(exec.arguments ?? null)}`;
       const prev = state.last.get(key) ?? 0;
-      if (prev >= config.repeatMax) {
+      if (prev >= live.repeatMax) {
         const text = `[answer-now] You ran ${exec.name} with these arguments ${prev + 1}× this turn. You already have this result — stop re-querying and answer with what you have.`;
         exec.agent.inbox.prepend("next-step", {
           role: "user",
           content: [{ type: "text", text }],
-          source: { ...SOURCE, form: "notice", summary: config.reminderSummary },
+          source: { ...SOURCE, form: "notice", summary: live.reminderSummary },
         });
         state.last.set(key, prev + 1);
         return;
@@ -424,19 +643,21 @@ function apply(ctx, config) {
       state.last.set(key, prev + 1);
     }
 
+    if (thresholds.length === 0) return;
+    if (state.level > maxLevel) state.level = maxLevel;
     while (state.level < maxLevel && state.count >= thresholds[state.level + 1]) state.level += 1;
     if (state.count < thresholds[state.level]) return;
     if (state.cooldown > 0) {
       state.cooldown -= 1;
       return;
     }
-    state.cooldown = config.cooldownSteps;
+    state.cooldown = live.cooldownSteps;
     if (state.level === maxLevel) state.done = true;
     const text = reminderText(state.count, thresholds[state.level + 1] ?? state.count, state.level === maxLevel);
     exec.agent.inbox.prepend("next-step", {
       role: "user",
       content: [{ type: "text", text }],
-      source: { ...SOURCE, form: "notice", summary: config.reminderSummary }
+      source: { ...SOURCE, form: "notice", summary: live.reminderSummary }
     });
   }
 
@@ -453,6 +674,10 @@ function apply(ctx, config) {
     if (!agent || !agent.session) return;
     if (signal && signal.aborted) return;
 
+    const live = store.get();
+    const review = resolveReviewConfig(live);
+    if (!review.enabled) return;
+
     const header = agent.session.header;
     if (header && header.origin === "subagent") return;
 
@@ -464,7 +689,7 @@ function apply(ctx, config) {
     if (!assistantText) return;
     const userPrompts = extractUserPrompts(events) ?? "";
 
-    const route = resolveReviewRoute(config, agent);
+    const route = resolveReviewRoute(live, agent);
     if (!route) return;
 
     const prompt = buildReviewPrompt({ userPrompts, assistantText, threshold: review.threshold });
@@ -504,23 +729,21 @@ function apply(ctx, config) {
     }
   }
 
-  if (review.enabled) {
-    ctx.on("agent/turn-stopping", async (payload) => {
-      await reviewTurn(payload).catch((error) => {
-        ctx.logger?.warn?.(`answer-now: review crashed, allowing turn to close: ${String(error)}`);
-      });
+  ctx.on("agent/turn-stopping", async (payload) => {
+    await reviewTurn(payload).catch((error) => {
+      ctx.logger?.warn?.(`answer-now: review crashed, allowing turn to close: ${String(error)}`);
     });
-  }
+  });
 
   ctx.on("agent/pre-step", ({ agent, messages }, next) => {
-    if (config.resetOnUserMessage && messages.some((message) => message.source?.kind === "user")) {
+    if (store.get().resetOnUserMessage && messages.some((message) => message.source?.kind === "user")) {
       chains.delete(agent);
     }
     return next();
   });
 
   if (config.showStartNotice) {
-    const notice = `[answer-now] Plugin enabled. It pushes me to do simple tasks simply (read the one file, make the one change, answer) and to deliver as soon as I have an answer, and will remind me inline (as "[answer-now] …" messages) once a turn uses too many tool calls. Active thresholds: ${thresholds.join(", ")}.`;
+    const notice = `[answer-now] Plugin enabled. It pushes me to do simple tasks simply (read the one file, make the one change, answer) and to deliver as soon as I have an answer, and will remind me inline (as "[answer-now] …" messages) once a turn uses too many tool calls. Active thresholds: ${view.thresholds.join(", ")}.`;
     ctx.on("agent/created", ({ agent }) => {
       const dispose = agent.ctx.on("agent/pre-step", ({ agent: current, step }, next) => {
         if (step === 1) {
