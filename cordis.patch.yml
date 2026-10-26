@@ -1,4 +1,3 @@
 - insert:
     - id: answer-now
       name: 'lin-answer-now'
-      config: {}

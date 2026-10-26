@@ -17,6 +17,7 @@ export const Config = z.object({
   cooldownSteps: z.number().default(1),
   reminderSummary: z.string().default("answer now"),
   resetOnUserMessage: z.boolean().default(true),
+  skipSubagents: z.boolean().default(true),
   quietTools: z.array(z.string()).default(["todo_write", "todo_read", "todo_write_many", "schedule_list"]),
   showStartNotice: z.boolean().default(true),
   simpleTaskFirst: z.boolean().default(true),
@@ -51,6 +52,13 @@ function matcher(patterns) {
   if (patterns.length === 0) return () => true;
   const regexps = patterns.map(wildcardToRegExp);
   return (value) => regexps.some((regexp) => regexp.test(value));
+}
+
+// Subagent and workflow sessions run their own tool loops; nudging them to
+// "stop querying" would interfere with legitimate delegated work.
+function isSubagentSession(agent) {
+  const origin = agent?.session?.header?.origin;
+  return origin === "subagent" || origin === "workflow";
 }
 
 function reminderText(count, threshold, last) {
@@ -96,6 +104,7 @@ function apply(ctx, config) {
 
   function observe(exec) {
     if (exec.agent === undefined) return;
+    if (config.skipSubagents && isSubagentSession(exec.agent)) return;
     if (!included(exec.name) || excluded(exec.name)) return;
     if (exec.signal?.aborted) return;
     const state = stateOf(exec.agent);
