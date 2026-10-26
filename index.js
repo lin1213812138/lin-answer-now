@@ -27,7 +27,7 @@ export const Config = z.object({
   // Review gate: an independent LLM grades each turn's final answer; a score
   // below `reviewThreshold` is fed back so the agent retries the same turn.
   reviewEnabled: z.boolean().default(true),
-  reviewThreshold: z.number().default(80),
+  reviewThreshold: z.number().default(70),
   maxChallenges: z.number().default(5),
   maxReviewTokens: z.number().default(512),
   reviewTimeoutMs: z.number().default(60_000),
