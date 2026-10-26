@@ -1,6 +1,6 @@
 {
   "name": "lin-answer-now",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": false,
   "type": "module",
   "description": "Push the agent to deliver its answer as soon as it has one instead of running extra queries.",
@@ -53,7 +53,10 @@
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": []
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings-plugins"
+      ]
     }
   }
 }

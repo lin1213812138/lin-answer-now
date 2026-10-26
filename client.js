@@ -200,15 +200,33 @@ window.__ModuleLoader__.load({
       );
     }
 
+    const PACKAGE_NAME = "lin-answer-now";
+    const ROW_IDS = ["answer-now", PACKAGE_NAME, "mkt-answer-now"];
+
+    // Keyed slots take `priority` (not `order`), and the slot id is the bare one —
+    // the "main." seen in a slot tree dump is only the parent path, not part of the id.
+    function registerPanel(ctx, slotName, key) {
+      try {
+        return ctx.slots.inject(slotName, () =>
+          ctx.slots.register({ name: slotName, key, priority: 30 }, ConfigPanel),
+        );
+      } catch (error) {
+        console.error(`[lin-answer-now] config panel failed to register on ${slotName} "${key}":`, error);
+        return undefined;
+      }
+    }
+
     return {
       inject: ["slots"],
       apply(ctx) {
-        ctx.slots.inject("main.plugins.row.config", () =>
-          ctx.slots.register(
-            { name: "main.plugins.row.config", key: "lin-answer-now#answer-now", order: 10 },
-            ConfigPanel,
-          ),
-        );
+        // The Plugins page keys `plugins.bundle.config` by the inventory's package
+        // name and `plugins.row.config` by `<package>#<row id>`. A renamed install
+        // row would otherwise render nothing and report nothing, so register every
+        // plausible spelling.
+        registerPanel(ctx, "plugins.bundle.config", PACKAGE_NAME);
+        for (const rowId of ROW_IDS) {
+          registerPanel(ctx, "plugins.row.config", `${PACKAGE_NAME}#${rowId}`);
+        }
       },
     };
   },
