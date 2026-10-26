@@ -24,6 +24,18 @@ dsh plugin --profile desktop add https://github.com/lin1213812138/lin-answer-now
 
 之后重启 `dsh web`（或刷新页面）即可生效。
 
+> **登录不了 npm？** 直接从 GitHub 源码安装，不需要 npm 账号或登录：
+>
+> ```sh
+> dsh plugin --profile desktop add https://github.com/lin1213812138/lin-answer-now
+> ```
+
+## 在其他电脑上安装
+
+每台电脑有各自独立的 DSH profile，插件不会自动跨机器同步。在另一台电脑上，只要跑一遍上面的任一安装命令即可（profile 名若不是 `desktop`，先用 `dsh profile list` 查一下），然后重启 `dsh web`（或刷新页面）。
+
+> **关于本地 `link:` 安装：** 如果你是从本地文件夹用 `link:` 方式装的（开发副本），插件会绑定到磁盘上的那个文件夹，别删它否则 link 会失效。通过 npm / GitHub 发布的安装是独立的，没有这个依赖。
+
 ## 配置
 
 以下均为可选项，默认值即可用。

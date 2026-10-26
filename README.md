@@ -28,6 +28,18 @@ dsh plugin --profile desktop add https://github.com/lin1213812138/lin-answer-now
 
 Then restart `dsh web` (or reload the page) and you're done.
 
+> **Can't reach npm?** Install straight from the GitHub source — this needs no npm account or login:
+>
+> ```sh
+> dsh plugin --profile desktop add https://github.com/lin1213812138/lin-answer-now
+> ```
+
+## Installing on another machine (中文说明见 README.zh.md)
+
+Each machine has its own DSH profile, so the plugin isn't shared automatically. On the other computer, just run one of the install commands above (use `dsh profile list` to find the profile name if it isn't `desktop`), then restart `dsh web` (or reload the page).
+
+> **Local `link:` installs:** if you installed from a local folder with a `link:` entry (development copy), the plugin is bound to that folder on disk — keep the folder around or the link breaks. Published npm/GitHub installs are self-contained and don't have this dependency.
+
 ## Configuration
 
 All values are optional; the defaults are sensible.
