@@ -1,6 +1,6 @@
 {
   "name": "lin-answer-now",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": false,
   "type": "module",
   "description": "Push the agent to deliver its answer as soon as it has one instead of running extra queries.",
