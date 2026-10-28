@@ -274,7 +274,7 @@ function extractUserPrompts(events) {
   for (const event of events) {
     if (!event || event.type !== "user/message") continue;
     const data = event.data;
-    if (!data || !data.source || data.source.kind === "plugin") continue;
+    if (!data || !data.source || data.source.kind === "plugin" || String(data.source.kind).startsWith("plugin:")) continue;
     const message = data.message;
     if (!message || !Array.isArray(message.content)) continue;
     const text = concatTextBlocks(message.content);
@@ -350,7 +350,7 @@ function buildReviewPrompt({ userPrompts, assistantText, threshold }) {
   const messages = [
     createUserMessage({
       content: [{ type: "text", text: userText }],
-      source: { kind: "plugin", plugin: name, note: "review-request" },
+      source: { kind: `plugin:${name}`, note: "review-request" },
     }),
   ];
   return Object.freeze({ system, messages });
@@ -403,7 +403,7 @@ function buildSteerMessage({ score, reason, attempt, maxAttempts }) {
   ].join("\n");
   return createUserMessage({
     content: [{ type: "text", text }],
-    source: { kind: "plugin", plugin: name, note: `steer-${safeAttempt}/${safeCap}` },
+    source: { kind: `plugin:${name}`, note: `steer-${safeAttempt}/${safeCap}` },
   });
 }
 
